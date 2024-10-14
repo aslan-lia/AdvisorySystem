@@ -1,0 +1,7 @@
+# Ignore virtual environment folder
+venv/
+nvd_env/
+__pycache__/
+
+# Ignore any API keys or sensitive files
+*.env
