@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, request, jsonify
 import requests
 from datetime import datetime, timedelta
 
@@ -12,11 +12,10 @@ cpe_url = 'https://services.nvd.nist.gov/rest/json/cpes/2.0'
 cve_url = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
 headers = {'apiKey': api_key}
 
-# Function to fetch CVEs for each CPE
 def fetch_cves_for_cpe(cpe_name):
     params_cve = {
         'cpeName': cpe_name,
-        'resultsPerPage': 5,
+        'resultsPerPage': 20,
     }
     response_cve = requests.get(cve_url, headers=headers, params=params_cve)
     if response_cve.status_code == 200:
@@ -25,54 +24,86 @@ def fetch_cves_for_cpe(cpe_name):
     else:
         return []
 
-# Route to display the CPE and CVE data
+def generate_date_ranges(start_date, end_date):
+    start = datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.strptime(end_date, '%Y-%m-%d')
+    ranges = []
+
+    while start < end:
+        next_end = min(start + timedelta(days=120), end)
+        ranges.append((start.strftime('%Y-%m-%dT%H:%M:%S.000Z'), next_end.strftime('%Y-%m-%dT%H:%M:%S.000Z')))
+        start = next_end + timedelta(days=1)
+
+    return ranges
+
+def fetch_all_cpe_data(start_date, end_date, params_cpe):
+    all_cpe_data = []
+    date_ranges = generate_date_ranges(start_date, end_date)
+
+    for start_iso, end_iso in date_ranges:
+        params_cpe['lastModStartDate'] = start_iso
+        params_cpe['lastModEndDate'] = end_iso
+
+        start_index = 0
+        while True:
+            params_cpe['startIndex'] = start_index
+            response_cpe = requests.get(cpe_url, headers=headers, params=params_cpe)
+
+            if response_cpe.status_code == 200:
+                data = response_cpe.json()
+                products = data.get('products', [])
+                all_cpe_data.extend(products)
+
+                start_index += len(products)
+
+                if len(products) < params_cpe['resultsPerPage']:
+                    break
+            else:
+                break
+
+    return all_cpe_data
+
 @app.route('/')
 def index():
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=120)
+    return render_template('index.html')
 
-    start_date_iso = start_date.strftime('%Y-%m-%dT%H:%M:%S.000Z')
-    end_date_iso = end_date.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+@app.route('/search', methods=['POST'])
+def search():
+    data = request.json
+    cpe_match = data.get('cpe_match', '').strip()
+    start_date = data.get('start_date')
+    end_date = data.get('end_date')
 
-    # Parameters for fetching CPEs (Microsoft products within the date range)
+    if not cpe_match or not start_date or not end_date:
+        return jsonify({'error': 'Please provide all the required fields.'}), 400
+
     params_cpe = {
-        'cpeMatchString': 'cpe:2.3:*:Microsoft',
-        'lastModStartDate': start_date_iso,
-        'lastModEndDate': end_date_iso,
-        'resultsPerPage': 20,
-        'startIndex': 0
+        'cpeMatchString': cpe_match,
+        'resultsPerPage': 10000,
     }
 
-    # Fetch CPE records
-    response_cpe = requests.get(cpe_url, headers=headers, params=params_cpe)
+    cpe_data = fetch_all_cpe_data(start_date, end_date, params_cpe)
 
-    if response_cpe.status_code == 200:
-        data = response_cpe.json()
-        cpe_data = []
-        
-        for product in data.get('products', []):
-            if not product['cpe'].get('deprecated', False):  # Only include non-deprecated products
-                cpe_name = product['cpe'].get('cpeName', 'N/A')
-                title = product['cpe']['titles'][0].get('title', 'N/A')
-                last_modified = product['cpe'].get('lastModified', 'N/A')
+    processed_cpe_data = []
+    for product in cpe_data:
+        if not product['cpe'].get('deprecated', False):
+            cpe_name = product['cpe'].get('cpeName', 'N/A')
+            title = product['cpe']['titles'][0].get('title', 'N/A')
+            last_modified = product['cpe'].get('lastModified', 'N/A')
 
-                # Fetch corresponding CVEs for this CPE
-                cve_items = fetch_cves_for_cpe(cpe_name)
-                cves = [{'id': cve.get('cve', {}).get('id', 'N/A'), 
-                         'description': cve.get('cve', {}).get('descriptions', [{}])[0].get('value', 'No description available')} 
-                        for cve in cve_items]
+            cve_items = fetch_cves_for_cpe(cpe_name)
+            cves = [{'id': cve.get('cve', {}).get('id', 'N/A'), 
+                     'description': cve.get('cve', {}).get('descriptions', [{}])[0].get('value', 'No description available')} 
+                    for cve in cve_items]
 
-                cpe_data.append({
-                    'cpe_name': cpe_name,
-                    'title': title,
-                    'last_modified': last_modified,
-                    'cves': cves
-                })
+            processed_cpe_data.append({
+                'cpe_name': cpe_name,
+                'title': title,
+                'last_modified': last_modified,
+                'cves': cves
+            })
 
-        return render_template('index.html', cpe_data=cpe_data)
-    else:
-        return 'Failed to retrieve data', 500
-
+    return jsonify({'cpe_data': processed_cpe_data})
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
